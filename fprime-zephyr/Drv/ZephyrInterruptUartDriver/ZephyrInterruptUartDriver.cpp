@@ -11,6 +11,7 @@
 #include "Fw/Types/BasicTypes.hpp"
 #include "Fw/Types/Assert.hpp"
 #include "Os/Task.hpp"
+#include "fprime-zephyr/Drv/ZephyrInterruptUartDriver/ZephyrUartErrorTypeEnumAc.hpp"
 #include <Fw/FPrimeBasicTypes.hpp>
 #include <Fw/Logger/Logger.hpp>
 #include <cerrno>
@@ -31,12 +32,8 @@ namespace Zephyr {
         if (uart_irq_update(me->m_dev) != 1) {
             return;
         }
-        // // If this is low then there's nothing to check
-        // // TODO may want to indicate this is an error
-        // if (uart_irq_is_pending(dev) != 1) {
-        //     return;
-        // }
 
+        // CHECK: Hardware errors first
         // RX: Read directly into ring buffer
         if (uart_irq_rx_ready(me->m_dev)) {
             uint8_t *data;
@@ -47,6 +44,8 @@ namespace Zephyr {
                 k_poll_signal_raise(&me->m_rxSignal, received);
             } else {
                 // Ring buffer full! Could signal error
+                uint8_t discard[64];
+                uart_fifo_read(me->m_dev, discard, sizeof(discard));
                 k_poll_signal_raise(&me->m_rxSignal, -1); // Error indicator
             }
         }
@@ -54,7 +53,7 @@ namespace Zephyr {
         // TX: Write directly from ring buffer
         if (uart_irq_tx_ready(me->m_dev)) {
             uint8_t *data;
-            uint32_t len = ring_buf_get_claim(&me->m_TxRingbuf, &data, 64);
+            uint32_t len = ring_buf_get_claim(&me->m_TxRingbuf, &data, 512);
             if (len > 0) {
                 int sent = uart_fifo_fill(me->m_dev, data, len);
                 ring_buf_get_finish(&me->m_TxRingbuf, sent);
@@ -67,6 +66,37 @@ namespace Zephyr {
             uart_irq_tx_disable(me->m_dev);  // Nothing to send
             // me->drvAsyncSendReturnOut_out(0, me->m_txBuff, Drv::ByteStreamStatus::OP_OK);
         }
+
+        int uart_errors = uart_err_check(me->m_dev);
+        if (uart_errors != 0) {
+            // Build error flags
+            int error_flags = 0;
+
+            if (uart_errors & UART_ERROR_OVERRUN) {
+                error_flags |= SIGNAL_ERR_UART_OVERRUN;
+            }
+            if (uart_errors & UART_ERROR_PARITY) {
+                error_flags |= SIGNAL_ERR_UART_PARITY;
+            }
+            if (uart_errors & UART_ERROR_FRAMING) {
+                error_flags |= SIGNAL_ERR_UART_FRAMING;
+            }
+            if (uart_errors & UART_BREAK) {
+                error_flags |= SIGNAL_ERR_UART_BREAK;
+            }
+
+            // Signal the errors (negative value)
+            k_poll_signal_raise(&me->m_rxSignal, -error_flags);
+
+            // Still need to drain UART FIFO to clear the error condition
+            if (uart_irq_rx_ready(me->m_dev)) {
+                uint8_t discard[64];
+                uart_fifo_read(me->m_dev, discard, sizeof(discard));
+            }
+
+            return; // Don't process data on error
+        }
+
     }
     // ----------------------------------------------------------------------
     // Construction, initialization, and destruction
@@ -100,29 +130,58 @@ namespace Zephyr {
             int bytes_or_error;
             k_poll_signal_check(&me->m_rxSignal, &signaled_count, &bytes_or_error);
 
-            // Check if we missed interrupts (signaled_count > 1 means ISR fired multiple times)
             if (signaled_count > 1) {
-                // Log warning about potential data backup
+                me->log_WARNING_LO_RxError(ZephyrUartErrorType::SIGNAL_BUFFER_ERROR);
             }
 
-            // FW_ASSERT(bytes_or_error >= 0, bytes_or_error);
+            // CHECK: Error conditions (negative values)
+            if (bytes_or_error < 0) {
+                int error_flags = -bytes_or_error;  // Make positive for bit checking
+
+                // Check specific error types
+                if (error_flags == SIGNAL_ERR_RING_OVERFLOW ||
+                    (error_flags & SIGNAL_ERR_RING_OVERFLOW)) {
+                    me->log_WARNING_LO_RxError(ZephyrUartErrorType::RING_BUFFER_OVERFLOW);
+                }
+
+                if (error_flags & SIGNAL_ERR_UART_OVERRUN) {
+                    me->log_WARNING_LO_RxError(ZephyrUartErrorType::UART_OVERRUN_ERROR);
+                }
+
+                if (error_flags & SIGNAL_ERR_UART_PARITY) {
+                    me->log_WARNING_LO_RxError(ZephyrUartErrorType::UART_PARITY_ERROR);
+                }
+
+                if (error_flags & SIGNAL_ERR_UART_FRAMING) {
+                    me->log_WARNING_LO_RxError(ZephyrUartErrorType::UART_FRAMING_ERROR);
+                }
+
+                if (error_flags & SIGNAL_ERR_UART_BREAK) {
+                    me->log_WARNING_LO_RxError(ZephyrUartErrorType::UART_BREAK_ERROR);
+                }
+            }
 
             k_poll_signal_reset(&me->m_rxSignal);
             events[0].state = K_POLL_STATE_NOT_READY;
 
             // Drain ring buffer
             while (ring_buf_size_get(&me->m_RxRingbuf) > 0) {
-                Fw::Buffer rxBuff = me->allocate_out(0, 64);
+                // Check available space first
+                uint32_t available = ring_buf_size_get(&me->m_RxRingbuf);
+                uint32_t to_read = (available > 512) ? 512 : available;  // Larger chunks
+
+                Fw::Buffer rxBuff = me->allocate_out(0, to_read);
                 FW_ASSERT(rxBuff.isValid());
 
-                U32 read = ring_buf_get(&me->m_RxRingbuf, reinterpret_cast<uint8_t *>(rxBuff.getData()),
-                                            rxBuff.getSize());
+                U32 read = ring_buf_get(&me->m_RxRingbuf,
+                                    reinterpret_cast<uint8_t *>(rxBuff.getData()),
+                                    rxBuff.getSize());
                 if (read > 0) {
                     rxBuff.setSize(read);
                     me->recv_out(0, rxBuff, Drv::ByteStreamStatus::OP_OK);
-                }
-                else {
+                } else {
                     me->deallocate_out(0, rxBuff);
+                    break;  // Nothing left to read
                 }
             }
         }
@@ -136,8 +195,17 @@ namespace Zephyr {
             return;
         }
 
+        struct uart_config uart_cfg = {
+            .baudrate = baud_rate,
+            .parity = UART_CFG_PARITY_NONE,
+            .stop_bits = UART_CFG_STOP_BITS_1,
+            .data_bits = UART_CFG_DATA_BITS_8,
+            .flow_ctrl = UART_CFG_FLOW_CTRL_NONE,
+        };
+        uart_configure(this->m_dev, &uart_cfg);
+
         Os::TaskString taskName("IsrRcv");
-        Os::Task::ParamType priority = Os::Task::TASK_DEFAULT;
+        Os::Task::ParamType priority = Os::Task::TASK_PRIORITY_DEFAULT;
         Os::Task::ParamType stackSize = 8 * 1024;
         Os::Task::ParamType cpuAffinity = Os::Task::TASK_DEFAULT;
         Os::Task::Arguments arguments(taskName, handle_isrRcv, this, priority, stackSize, cpuAffinity);
@@ -177,10 +245,10 @@ namespace Zephyr {
 
         if (written == sendBuffer.getSize()) {
             uart_irq_tx_enable(this->m_dev);  // Start transmission
-            drvAsyncSendReturnOut_out(0, sendBuffer, Drv::ByteStreamStatus::OP_OK);
+            this->drvAsyncSendReturnOut_out(0, sendBuffer, Drv::ByteStreamStatus::OP_OK);
         } else {
             // Ring buffer full
-            drvAsyncSendReturnOut_out(0, sendBuffer, Drv::ByteStreamStatus::SEND_RETRY);
+            this->drvAsyncSendReturnOut_out(0, sendBuffer, Drv::ByteStreamStatus::SEND_RETRY);
         }
     }
 

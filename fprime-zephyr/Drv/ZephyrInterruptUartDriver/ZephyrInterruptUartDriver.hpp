@@ -72,7 +72,7 @@ namespace Zephyr {
             Fw::Buffer &returnBuffer
         );
 
-        static constexpr size_t RING_SIZE = 1024;
+        static constexpr size_t RING_SIZE = 2048;
     private:
         void static uartISR(const struct device *dev, void *user_data);
         const struct device *m_dev;
@@ -86,6 +86,12 @@ namespace Zephyr {
         k_poll_signal m_rxSignal;
 
         static void handle_isrRcv(void* ptr);
+        // Signal error flags (for bytes_or_error when negative)
+        static constexpr int SIGNAL_ERR_RING_OVERFLOW  = (1 << 0);  // -1
+        static constexpr int SIGNAL_ERR_UART_OVERRUN   = (1 << 1);  // -2
+        static constexpr int SIGNAL_ERR_UART_PARITY    = (1 << 2);  // -4
+        static constexpr int SIGNAL_ERR_UART_FRAMING   = (1 << 3);  // -8
+        static constexpr int SIGNAL_ERR_UART_BREAK     = (1 << 4);  // -16
     };
 
 } // end namespace Zephyr
