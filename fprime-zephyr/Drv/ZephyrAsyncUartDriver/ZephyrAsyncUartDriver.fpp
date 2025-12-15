@@ -1,5 +1,11 @@
 module Zephyr {
 
+  struct BufferDescriptor {
+    Address: U64
+    Length: FwSizeType
+    Context: FwIdType
+  }
+
   passive component ZephyrAsyncUartDriver {
     import Drv.ByteStreamDriver
 

@@ -10,9 +10,13 @@
 #include "Fw/Buffer/Buffer.hpp"
 #include "Fw/Types/BasicTypes.hpp"
 #include "Fw/Types/Assert.hpp"
+#include "Platform/PlatformTypes.h"
+#include "config/FwIndexTypeAliasAc.h"
+#include "fprime-zephyr/Drv/ZephyrAsyncUartDriver/BufferDescriptorSerializableAc.hpp"
 #include <Fw/FPrimeBasicTypes.hpp>
 #include <Fw/Logger/Logger.hpp>
 #include <cerrno>
+#include <cstdint>
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/uart.h>
@@ -27,17 +31,18 @@ namespace Zephyr {
         ZephyrAsyncUartDriver *driver = reinterpret_cast<ZephyrAsyncUartDriver *>(user_data);
         I32 rc;
         Fw::String evtName("Unknown");
-        Fw::Buffer rxBuff;
+        Fw::Buffer uartBuff;
+        BufferDescriptor bufferDesc;
 
         switch (evt->type) {
         case UART_RX_BUF_REQUEST:
             evtName = "UART_RX_BUF_REQUEST";
-            rxBuff = driver->allocate_out(0, MAX_RX_BUFF_SIZE);
-            rc = uart_rx_buf_rsp(dev, rxBuff.getData(), rxBuff.getSize());
-            FW_ASSERT(rxBuff.getSize() >= MAX_RX_BUFF_SIZE, rxBuff.getSize());
+            uartBuff = driver->allocate_out(0, MAX_RX_BUFF_SIZE);
+            rc = uart_rx_buf_rsp(dev, reinterpret_cast<uint8_t*>(uartBuff.getData()), uartBuff.getSize());
+            FW_ASSERT(uartBuff.getSize() >= MAX_RX_BUFF_SIZE, uartBuff.getSize());
             // Indicates Next Buffer is already set so we can de allocate this one
             if (rc == -EBUSY) {
-                driver->deallocate_out(0, rxBuff);
+                driver->deallocate_out(0, uartBuff);
                 break;
             }
             FW_ASSERT(rc == 0, rc);
@@ -45,8 +50,8 @@ namespace Zephyr {
         case UART_RX_RDY:
             evtName = "UART_RX_RDY";
             // TODO consider using a ring buffer here
-            rxBuff.set(evt->data.rx.buf + evt->data.rx.offset, evt->data.rx.len, Fw::Buffer::NO_CONTEXT);
-            driver->recv_out(0, rxBuff, evt->data.rx.len > 0 ? Drv::ByteStreamStatus::OP_OK : Drv::ByteStreamStatus::RECV_NO_DATA);
+            uartBuff.set(reinterpret_cast<U8*>(evt->data.rx.buf + evt->data.rx.offset), evt->data.rx.len, Fw::Buffer::NO_CONTEXT);
+            driver->recv_out(0, uartBuff, evt->data.rx.len > 0 ? Drv::ByteStreamStatus::OP_OK : Drv::ByteStreamStatus::RECV_NO_DATA);
             break;
         case UART_RX_STOPPED:
             evtName = "UART_RX_STOPPED";
@@ -59,14 +64,19 @@ namespace Zephyr {
                 evtName = "UART_RX_DISABLED";
             }
 
-            rxBuff.setData(evt->data.rx_buf.buf);
-            driver->deallocate_out(0, rxBuff);
+            uartBuff.setData(reinterpret_cast<U8*>(evt->data.rx_buf.buf));
+            driver->deallocate_out(0, uartBuff);
             break;
         case UART_TX_DONE:
             evtName = "UART_TX_DONE";
-            driver->drvAsyncSendReturnOut_out(0, driver->txPendingBuffer, Drv::ByteStreamStatus::OP_OK);
+            // driver->m_queue.dequeue(reinterpret_cast<U8*>(&bufferDesc), bufferDesc.serializedSize());
+            // uartBuff.set(reinterpret_cast<U8*>(bufferDesc.get_Address()), bufferDesc.get_Length(), bufferDesc.get_Context());
+            // FW_ASSERT(evt->data.tx.buf == reinterpret_cast<uint8_t *>(uartBuff.getData()));
+            // FW_ASSERT(evt->data.tx.len == uartBuff.getSize());
+            // driver->drvAsyncSendReturnOut_out(0, uartBuff, Drv::ByteStreamStatus::OP_OK);
+            driver->drvAsyncSendReturnOut_out(0, driver->m_txPending, Drv::ByteStreamStatus::OP_OK);
             break;
-            default:
+        default:
             break;
         }
         // driver->log_ACTIVITY_LO_ZEPHYR_UART_STATE_CHANGE(evt->type, evtName);
@@ -95,23 +105,11 @@ namespace Zephyr {
 
         FW_ASSERT(device_is_ready(this->m_dev));
 
-        struct uart_config uart_cfg = {
-            .baudrate = baud_rate,
-            .parity = UART_CFG_PARITY_NONE,
-            .stop_bits = UART_CFG_STOP_BITS_1,
-            .data_bits = UART_CFG_DATA_BITS_8,
-            .flow_ctrl = UART_CFG_FLOW_CTRL_NONE,
-        };
-        uart_configure(this->m_dev, &uart_cfg);
-
         I32 ret = uart_callback_set(this->m_dev, this->uartEventCallback, (void *)this);
         FW_ASSERT(ret == 0, ret);
 
         Fw::Buffer rxBuff = this->allocate_out(0, MAX_RX_BUFF_SIZE);
-        FW_ASSERT(rxBuff.getSize() >= MAX_RX_BUFF_SIZE, rxBuff.getSize());
-
-        ret = uart_rx_enable(this->m_dev, rxBuff.getData(), rxBuff.getSize(), SYS_FOREVER_US);
-        FW_ASSERT(ret == 0, ret);
+        FW_ASSERT(rxBuff.isValid() && rxBuff.getSize() >= MAX_RX_BUFF_SIZE, rxBuff.getSize());
 
         if (this->isConnected_ready_OutputPort(0)) {
             this->ready_out(0);
@@ -130,7 +128,8 @@ namespace Zephyr {
         Drv::ByteStreamStatus sendResponse = Drv::ByteStreamStatus::OP_OK;
         FW_ASSERT(this->isConnected_drvAsyncSendReturnOut_OutputPort(0));
         int rc;
-        rc = uart_tx(this->m_dev, sendBuffer.getData(), sendBuffer.getSize(), SYS_FOREVER_US);
+        this->m_txPending = sendBuffer;
+        rc = uart_tx(this->m_dev, reinterpret_cast<uint8_t*>(sendBuffer.getData()), sendBuffer.getSize(), SYS_FOREVER_US);
         switch (rc) {
             case (-EBUSY):
                 this->drvAsyncSendReturnOut_out(0, sendBuffer, Drv::ByteStreamStatus::SEND_RETRY);
@@ -139,7 +138,7 @@ namespace Zephyr {
                 this->drvAsyncSendReturnOut_out(0, sendBuffer, Drv::ByteStreamStatus::OTHER_ERROR);
                 break;
             case 0:
-                this->txPendingBuffer = sendBuffer;
+                // Track the buffer here via sendBuffer.getContext()
                 break;
         }
     }
