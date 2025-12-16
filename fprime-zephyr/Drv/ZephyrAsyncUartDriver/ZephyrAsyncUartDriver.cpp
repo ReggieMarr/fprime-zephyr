@@ -205,10 +205,30 @@ namespace Zephyr {
         static uint32_t test_counter = 0;
         uint8_t pattern_idx = test_counter % 4;
         test_counter++;
+        // ============================================================
+        // DIAGNOSTIC: Check original buffer properties
+        // ============================================================
+
+        uint8_t* orig_buf = reinterpret_cast<uint8_t*>(sendBuffer.getData());
+        size_t orig_size = sendBuffer.getSize();
+        uintptr_t buf_addr = (uintptr_t)orig_buf;
+
+        Fw::Logger::log("ORIG BUF: addr=%p size=%u\n", orig_buf, orig_size);
+        Fw::Logger::log("ORIG BUF: alignment=%u bytes\n",
+                        (unsigned)(buf_addr & -(intptr_t)buf_addr));
+        Fw::Logger::log("ORIG BUF: cache_line_offset=%u\n",
+                        (unsigned)(buf_addr & 0x1F));  // Offset within 32-byte line
+
+        // Check if in SRAM range (adjust for your chip)
+        if (buf_addr >= 0x20000000 && buf_addr < 0x20100000) {
+            Fw::Logger::log("ORIG BUF: ✓ In SRAM range\n");
+        } else {
+            Fw::Logger::log("ORIG BUF: ✗ NOT in SRAM! (0x%08x)\n", (unsigned)buf_addr);
+        }
         int rc;
         this->m_txPending = sendBuffer;
 
-        rc = uart_tx(this->m_dev, test_patterns[pattern_idx], ARRAY_SIZE(test_patterns[pattern_idx]), SYS_FOREVER_US);
+        rc = uart_tx(this->m_dev, orig_buf, orig_size, SYS_FOREVER_US);
         switch (rc) {
             case (-EBUSY):
                 this->drvAsyncSendReturnOut_out(0, sendBuffer, Drv::ByteStreamStatus::SEND_RETRY);
