@@ -167,9 +167,48 @@ namespace Zephyr {
     {
         Drv::ByteStreamStatus sendResponse = Drv::ByteStreamStatus::OP_OK;
         FW_ASSERT(this->isConnected_drvAsyncSendReturnOut_OutputPort(0));
+        // ============================================================
+        // TEST: Cycle through different test patterns
+        // ============================================================
+
+        static uint8_t __aligned(32) test_patterns[4][32] = {
+            // Pattern 0: Alternating bits (0x55 = 01010101, 0xAA = 10101010)
+            {
+                0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA,
+                0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA,
+                0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA,
+                0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA
+            },
+            // Pattern 1: ASCII text
+            {
+                'T', 'h', 'i', 's', ' ', 'i', 's', ' ',
+                'a', ' ', 't', 'e', 's', 't', ' ', 'm',
+                's', 'g', ' ', 'f', 'r', 'o', 'm', ' ',
+                'D', 'M', 'A', ' ', 'U', 'A', 'R', 'T'
+            },
+            // Pattern 2: Incrementing counter
+            {
+                0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+                0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+                0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+                0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F
+            },
+            // Pattern 3: All same byte (good for scope triggering)
+            {
+                0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+            }
+        };
+
+        static uint32_t test_counter = 0;
+        uint8_t pattern_idx = test_counter % 4;
+        test_counter++;
         int rc;
         this->m_txPending = sendBuffer;
-        rc = uart_tx(this->m_dev, reinterpret_cast<uint8_t*>(sendBuffer.getData()), sendBuffer.getSize(), SYS_FOREVER_US);
+
+        rc = uart_tx(this->m_dev, test_patterns[pattern_idx], ARRAY_SIZE(test_patterns[pattern_idx]), SYS_FOREVER_US);
         switch (rc) {
             case (-EBUSY):
                 this->drvAsyncSendReturnOut_out(0, sendBuffer, Drv::ByteStreamStatus::SEND_RETRY);
