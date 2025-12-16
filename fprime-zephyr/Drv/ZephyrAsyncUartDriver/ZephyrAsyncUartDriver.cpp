@@ -10,9 +10,13 @@
 #include "Fw/Buffer/Buffer.hpp"
 #include "Fw/Types/BasicTypes.hpp"
 #include "Fw/Types/Assert.hpp"
+#include "Os/Mutex.hpp"
 #include "Platform/PlatformTypes.h"
 #include "config/FwIndexTypeAliasAc.h"
 #include "fprime-zephyr/Drv/ZephyrAsyncUartDriver/BufferDescriptorSerializableAc.hpp"
+#include "fprime-zephyr/Os/Mutex.hpp"
+#include "zephyr/irq.h"
+#include "zephyr/sys/util.h"
 #include <Fw/FPrimeBasicTypes.hpp>
 #include <Fw/Logger/Logger.hpp>
 #include <cerrno>
@@ -32,7 +36,6 @@ namespace Zephyr {
         I32 rc;
         Fw::String evtName("Unknown");
         Fw::Buffer uartBuff;
-        BufferDescriptor bufferDesc;
 
         switch (evt->type) {
         case UART_RX_BUF_REQUEST:
@@ -50,8 +53,9 @@ namespace Zephyr {
         case UART_RX_RDY:
             evtName = "UART_RX_RDY";
             // TODO consider using a ring buffer here
-            uartBuff.set(reinterpret_cast<U8*>(evt->data.rx.buf + evt->data.rx.offset), evt->data.rx.len, Fw::Buffer::NO_CONTEXT);
-            driver->recv_out(0, uartBuff, evt->data.rx.len > 0 ? Drv::ByteStreamStatus::OP_OK : Drv::ByteStreamStatus::RECV_NO_DATA);
+            driver->m_rxPending.set(reinterpret_cast<U8*>(evt->data.rx.buf + evt->data.rx.offset), evt->data.rx.len, Fw::Buffer::NO_CONTEXT);
+            // driver->recv_out(0, uartBuff, evt->data.rx.len > 0 ? Drv::ByteStreamStatus::OP_OK : Drv::ByteStreamStatus::RECV_NO_DATA);
+            (void)k_work_submit(&driver->m_rxWorkContext.work);
             break;
         case UART_RX_STOPPED:
             evtName = "UART_RX_STOPPED";
@@ -69,17 +73,42 @@ namespace Zephyr {
             break;
         case UART_TX_DONE:
             evtName = "UART_TX_DONE";
-            // driver->m_queue.dequeue(reinterpret_cast<U8*>(&bufferDesc), bufferDesc.serializedSize());
-            // uartBuff.set(reinterpret_cast<U8*>(bufferDesc.get_Address()), bufferDesc.get_Length(), bufferDesc.get_Context());
-            // FW_ASSERT(evt->data.tx.buf == reinterpret_cast<uint8_t *>(uartBuff.getData()));
-            // FW_ASSERT(evt->data.tx.len == uartBuff.getSize());
-            // driver->drvAsyncSendReturnOut_out(0, uartBuff, Drv::ByteStreamStatus::OP_OK);
-            driver->drvAsyncSendReturnOut_out(0, driver->m_txPending, Drv::ByteStreamStatus::OP_OK);
+            (void)k_work_submit(&driver->m_txWorkContext.work);
             break;
         default:
             break;
         }
         // driver->log_ACTIVITY_LO_ZEPHYR_UART_STATE_CHANGE(evt->type, evtName);
+    }
+
+    void ZephyrAsyncUartDriver::rxDoneWorkHandler(struct k_work *workReference) {
+        UartWorkContext_t *context = CONTAINER_OF(workReference, UartWorkContext_t, work);
+
+        Fw::Buffer pendingRxBuff = context->driver->m_rxPending;
+        context->driver->m_rxPending = Fw::Buffer();  // Clear/invalidate txPending
+
+        // Safe to call F' ports in thread context
+        if (pendingRxBuff.isValid() && pendingRxBuff.getSize() > 0) {
+            context->driver->recv_out(0, pendingRxBuff, Drv::ByteStreamStatus::OP_OK);
+        }
+        else {
+            context->driver->deallocate_out(0, pendingRxBuff);
+        }
+    }
+
+    void ZephyrAsyncUartDriver::txDoneWorkHandler(struct k_work *workReference) {
+        UartWorkContext_t *context = CONTAINER_OF(workReference, UartWorkContext_t, work);
+
+        Fw::Buffer completedBuffer;
+        {
+            Os::ScopeLock _txLock(context->driver->m_txLock);
+            FW_ASSERT(context->driver->m_txPending.isValid());
+            completedBuffer = context->driver->m_txPending;
+            context->driver->m_txPending = Fw::Buffer();  // Clear/invalidate txPending
+        }
+
+        // Safe to call F' ports in thread context
+        context->driver->drvAsyncSendReturnOut_out(0, completedBuffer, Drv::ByteStreamStatus::OP_OK);
     }
 
     // ----------------------------------------------------------------------
@@ -110,6 +139,17 @@ namespace Zephyr {
 
         Fw::Buffer rxBuff = this->allocate_out(0, MAX_RX_BUFF_SIZE);
         FW_ASSERT(rxBuff.isValid() && rxBuff.getSize() >= MAX_RX_BUFF_SIZE, rxBuff.getSize());
+        ret = uart_rx_enable(this->m_dev,
+                            reinterpret_cast<uint8_t*>(rxBuff.getData()),
+                            rxBuff.getSize(),
+                            SYS_FOREVER_US);
+        FW_ASSERT(ret == 0, ret);
+        // Initialize worker queue/handler
+        this->m_txWorkContext.driver = this;
+        k_work_init(&this->m_txWorkContext.work, this->txDoneWorkHandler);
+
+        this->m_rxWorkContext.driver = this;
+        k_work_init(&this->m_rxWorkContext.work, this->rxDoneWorkHandler);
 
         if (this->isConnected_ready_OutputPort(0)) {
             this->ready_out(0);

@@ -8,6 +8,7 @@
 #define ZephyrAsyncUartDriver_HPP
 
 #include "Fw/Buffer/Buffer.hpp"
+#include "Os/Mutex.hpp"
 #include "Utils/Types/Queue.hpp"
 #include "config/FwIndexTypeAliasAc.h"
 #include "config/FwSizeTypeAliasAc.h"
@@ -75,11 +76,19 @@ namespace Zephyr {
     private:
         void static uartEventCallback(const struct device *dev, struct uart_event *evt, void *user_data);
         const struct device *m_dev;
-        // NOTE this is a wag, come up with better estimates
-        // static constexpr FwSizeType FIFO_QUEUE_SIZE = 5;
-        // Types::Queue m_queue;  //!< Stores queued data waiting for transmission
-        // U8 m_allocation[sizeof(BufferDescriptor::SERIALIZED_SIZE) * FIFO_QUEUE_SIZE];
+        typedef struct UartWorkContext_s {
+            struct k_work work;
+            ZephyrAsyncUartDriver *driver;
+        } UartWorkContext_t;
+
+        UartWorkContext_t m_txWorkContext;
+        static void txDoneWorkHandler(struct k_work *work);
         Fw::Buffer m_txPending;
+        Os::Mutex m_txLock;
+
+        UartWorkContext_t m_rxWorkContext;
+        static void rxDoneWorkHandler(struct k_work *work);
+        Fw::Buffer m_rxPending;
     };
 
 } // end namespace Zephyr
