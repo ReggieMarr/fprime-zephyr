@@ -6,6 +6,16 @@ module Zephyr {
     Context: FwIdType
   }
 
+  @Derived from zephyr/drivers/uart.h v4.2
+  enum ZephyrUartStopReason: U8 {
+    ERROR_OVERRUN   = 1,
+    ERROR_PARITY    = 2,
+    ERROR_FRAMING   = 4,
+    BREAK           = 8,
+    ERROR_COLLISION = 16,
+    ERROR_NOISE     = 32
+  }
+
   passive component ZephyrAsyncUartDriver {
     import Drv.ByteStreamDriver
 
@@ -44,5 +54,11 @@ module Zephyr {
     ) \
     severity activity low \
     format "{} {}"
+
+    event ZEPHYR_RX_STOPPED(
+        stopReason: ZephyrUartStopReason,
+    ) \
+    severity warning high \
+    format "{}"
   }
 }

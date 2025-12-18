@@ -9,12 +9,15 @@
 
 #include "Fw/Buffer/Buffer.hpp"
 #include "Os/Mutex.hpp"
+#include "Svc/Ccsds/Types/SpacePacketHeaderSerializableAc.hpp"
 #include "Utils/Types/Queue.hpp"
 #include "config/FwIndexTypeAliasAc.h"
 #include "config/FwSizeTypeAliasAc.h"
 #include "fprime-zephyr/Drv/ZephyrAsyncUartDriver/BufferDescriptorSerializableAc.hpp"
 #include "fprime-zephyr/Drv/ZephyrAsyncUartDriver/ZephyrAsyncUartDriverComponentAc.hpp"
 
+#include <array>
+#include <atomic>
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/uart.h>
@@ -48,7 +51,8 @@ namespace Zephyr {
 
     public:
 
-        static constexpr FwSizeType MAX_RX_BUFF_SIZE = 1024;
+        static constexpr FwSizeType RX_ACCUMULATE_SIZE = 256;
+        static constexpr FwSizeType RX_WORK_QUEUE_SIZE = 5;
 
         // ----------------------------------------------------------------------
         // Handler implementations for user-defined typed input ports
@@ -78,17 +82,15 @@ namespace Zephyr {
         const struct device *m_dev;
         typedef struct UartWorkContext_s {
             struct k_work work;
+            Fw::Buffer pendingBuff;
             ZephyrAsyncUartDriver *driver;
         } UartWorkContext_t;
 
         UartWorkContext_t m_txWorkContext;
         static void txDoneWorkHandler(struct k_work *work);
-        Fw::Buffer m_txPending;
-        Os::Mutex m_txLock;
 
-        UartWorkContext_t m_rxWorkContext;
+        std::array<UartWorkContext_t, RX_WORK_QUEUE_SIZE>  m_rxWorkContexts;
         static void rxDoneWorkHandler(struct k_work *work);
-        Fw::Buffer m_rxPending;
     };
 
 } // end namespace Zephyr
