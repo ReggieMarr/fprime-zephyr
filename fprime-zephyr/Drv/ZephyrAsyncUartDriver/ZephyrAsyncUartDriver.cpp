@@ -52,15 +52,16 @@ namespace Zephyr {
             break;
         case UART_RX_RDY:
             // TODO consider using a ring buffer here
-            driver->m_rxWorkContexts.at(0).pendingBuff.set(reinterpret_cast<U8*>(evt->data.rx.buf + evt->data.rx.offset), evt->data.rx.len, Fw::Buffer::NO_CONTEXT);
-            (void)k_work_submit(&driver->m_rxWorkContexts.at(0).work);
+            uartBuff.set(reinterpret_cast<U8*>(evt->data.rx.buf + evt->data.rx.offset), evt->data.rx.len, Fw::Buffer::NO_CONTEXT);
+            // NOTE this is expected to block until the buffer is passed down stream and the ownership is passed back to us
+            // Currently this will work since it passes through a series of sync ports but we should leverage a semaphore here
+            driver->recv_out(0, uartBuff, evt->data.rx.len > 0 ? Drv::ByteStreamStatus::OP_OK : Drv::ByteStreamStatus::RECV_NO_DATA);
             break;
         case UART_RX_STOPPED:
-            // TODO consider using k_work to offload this
             driver->log_WARNING_HI_ZEPHYR_RX_STOPPED(stopReason);
         case UART_RX_BUF_RELEASED:
         case UART_RX_DISABLED:
-            uartBuff.setData(reinterpret_cast<U8*>(evt->data.rx_buf.buf));
+            uartBuff.set(reinterpret_cast<U8*>(evt->data.rx_buf.buf), evt->data.rx.len, Fw::Buffer::NO_CONTEXT);
             driver->deallocate_out(0, uartBuff);
             break;
         case UART_TX_DONE:
@@ -184,7 +185,8 @@ namespace Zephyr {
     }
 
     void ZephyrAsyncUartDriver ::recvReturnIn_handler(const FwIndexType portNum, Fw::Buffer &returnBuffer) {
-        this->deallocate_out(0, returnBuffer);
+        // NOTE this is a NO-OP since we manage the buffer based off of the uart state machine
+        // this->deallocate_out(0, returnBuffer);
     }
 
 } // end namespace Zephyr
