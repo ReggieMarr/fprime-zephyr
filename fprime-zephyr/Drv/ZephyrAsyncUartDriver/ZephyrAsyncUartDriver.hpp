@@ -80,17 +80,15 @@ namespace Zephyr {
     private:
         void static uartEventCallback(const struct device *dev, struct uart_event *evt, void *user_data);
         const struct device *m_dev;
+        U32 m_rxBuffContext;
         typedef struct UartWorkContext_s {
             struct k_work work;
             Fw::Buffer pendingBuff;
             ZephyrAsyncUartDriver *driver;
         } UartWorkContext_t;
-
-        UartWorkContext_t m_txWorkContext;
-        static void txDoneWorkHandler(struct k_work *work);
+        Fw::Buffer m_pendingTxBuff;
 
         std::array<UartWorkContext_t, RX_WORK_QUEUE_SIZE>  m_rxWorkContexts;
-        static void rxDoneWorkHandler(struct k_work *work);
     };
 
 } // end namespace Zephyr
